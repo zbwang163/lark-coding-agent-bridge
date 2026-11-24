@@ -1,10 +1,17 @@
 import type { LarkChannel } from '@larksuite/channel';
+import { randomUUID } from 'node:crypto';
 import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
+import { maskEmails } from '../card/mask-email';
+import { splitMarkdown } from '../card/split-markdown';
 import type { RunState } from '../card/run-state';
 import { log } from '../core/logger';
 
 const UPDATE_INTERVAL_MS = 750;
 const STREAM_WINDOW_MS = 9 * 60_000;
+// Leave space below Feishu's 30KB card limit for server-side representation.
+const CARD_MAX_BYTES = 28_000;
+// Keep post JSON and its transport escaping comfortably below the message limit.
+const ANSWER_CHUNK_BYTES = 8_000;
 
 interface RunCardPublisherOptions {
   channel: LarkChannel;
@@ -29,6 +36,8 @@ export class RunCardPublisher {
   private updateTimer: NodeJS.Timeout | undefined;
   private latestState: RunState | undefined;
   private finishing = false;
+  private finalization: Promise<void> | undefined;
+  private readonly answerUuid = randomUUID();
 
   /** Retain the existing reply target and signed rendering options for this run. */
   constructor(private readonly options: RunCardPublisherOptions) {}
@@ -39,11 +48,15 @@ export class RunCardPublisher {
     return this.enqueue(this.publish.bind(this, state));
   }
 
-  /** Cancel the deadline and serialize final delivery behind any in-flight update. */
+  /** Serialize final delivery once, including any long-answer continuation messages. */
   finish(state: RunState): Promise<void> {
+    // Reusing the promise also prevents repeating already-sent answer chunks
+    // when finalization failed partway through or a caller closes twice.
+    if (this.finalization) return this.finalization;
     this.finishing = true;
     this.clearTimers();
-    return this.enqueue(this.finalize.bind(this, state));
+    this.finalization = this.enqueue(this.finalize.bind(this, state));
+    return this.finalization;
   }
 
   /** Publish meaningful running states at most once per interval; keep draining on API failures. */
@@ -51,9 +64,12 @@ export class RunCardPublisher {
     // Terminal content is flushed by finish(), independent of the throttle.
     // After a delivery error only finish may repair the existing entity.
     if (this.finishing || state.terminal !== 'running' || this.deliveryError) return;
+    // Decide single-card versus split delivery only at finish, so a long
+    // final_text event cannot first overflow an in-progress card update.
+    if (state.finalText?.trim()) return;
     // Empty states must still clear an existing tool-only card when preferences
     // change. A final-only turn waits for finish() and sends a completed card.
-    if (!this.cardId && (!hasCardContent(state) || state.finalText?.trim())) return;
+    if (!this.cardId && !hasCardContent(state)) return;
     const remainingMs = UPDATE_INTERVAL_MS - (Date.now() - this.lastUpdateAt);
     if (remainingMs > 0) {
       // Flush the last throttled state even if the agent then goes silent in
@@ -83,9 +99,28 @@ export class RunCardPublisher {
     }
   }
 
-  /** Flush the final state to the original message, or send a final-only card once. */
+  /** Keep ordinary answers in one card and route oversized answers through bounded continuation. */
   private async finalize(state: RunState): Promise<void> {
-    // A failed/uncertain send must never be followed by a second send. An
+    // No alternate delivery path may continue after a permission failure.
+    if (this.blocked) throw this.deliveryError;
+    const hasAnswer = Boolean(state.finalText?.trim());
+    if (hasAnswer && Buffer.byteLength(JSON.stringify(this.render(state)), 'utf8') > CARD_MAX_BYTES) {
+      await this.finalizeLongAnswer(state);
+      return;
+    }
+    try {
+      await this.finalizeCard(state);
+    } catch (error) {
+      // Only a definite size rejection permits switching delivery formats;
+      // unknown send results must not produce a duplicate final answer.
+      if (!hasAnswer || !isCardSizeFailure(error) || this.blocked) throw error;
+      await this.finalizeLongAnswer(state);
+    }
+  }
+
+  /** Flush one card without splitting; shared by normal answers and the continuation notice. */
+  private async finalizeCard(state: RunState): Promise<void> {
+    // A failed/uncertain create must not create another process card. An
     // authorization failure also forbids trying another API to deliver it.
     if (this.blocked || (this.deliveryError && !this.cardId)) throw this.deliveryError;
     if (!this.cardId) {
@@ -119,6 +154,60 @@ export class RunCardPublisher {
         terminal: state.terminal,
       });
     } catch (error) {
+      this.recordFailure(error);
+      throw error;
+    }
+  }
+
+  /** Retain one process card and send only the complete final answer as Markdown chunks. */
+  private async finalizeLongAnswer(state: RunState): Promise<void> {
+    if (this.blocked) throw this.deliveryError;
+    const processState = { ...state, finalText: undefined };
+    // A size-rejected create never produced an entity, so a smaller process
+    // card may be created safely. Unknown delivery errors stay latched.
+    if (!this.cardId && isCardSizeFailure(this.deliveryError)) this.deliveryError = undefined;
+    // Final-only turns need no extra placeholder card. Existing process cards
+    // retain their history and collapse before the answer continuation.
+    if (this.cardId || hasCardContent(processState)) {
+      try {
+        await this.finalizeCard({ ...state, finalText: '答案较长，完整内容见后续分段消息。' });
+      } catch (error) {
+        // A failed process notice must not suppress an unsent answer, but
+        // permission failures always stop further API calls.
+        if (this.blocked || isAuthorizationFailure(error)) throw error;
+        log.warn('outbound', 'run-card-continuation-notice-failed', { scope: this.options.scope });
+      }
+    }
+    try {
+      const chunks = splitMarkdown(maskEmails(state.finalText ?? ''), ANSWER_CHUNK_BYTES);
+      for (let index = 0; index < chunks.length; index++) {
+        // Native post Markdown avoids SDK retries and reply-to-create fallback.
+        // Every part has a stable UUID and keeps the original topic target.
+        const response = await this.options.channel.rawClient.im.v1.message.reply({
+          path: { message_id: this.options.sendOpts.replyTo },
+          data: {
+            msg_type: 'post',
+            content: JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: chunks[index] }]] } }),
+            reply_in_thread: this.options.sendOpts.replyInThread,
+            uuid: `answer_${this.answerUuid}_${index}`,
+          },
+        });
+        requireCardSuccess(response);
+        if (!response.data?.message_id?.trim()) throw new Error('Long answer returned no message_id');
+        log.info('outbound', 'run-answer-part-sent', {
+          scope: this.options.scope,
+          messageId: response.data.message_id,
+          part: index + 1,
+          totalParts: chunks.length,
+        });
+      }
+      log.info('outbound', 'run-answer-split', {
+        scope: this.options.scope,
+        messageCount: chunks.length,
+      });
+    } catch (error) {
+      // Earlier chunks may already be delivered. Preserve this failure and
+      // never restart the full answer automatically.
       this.recordFailure(error);
       throw error;
     }
@@ -258,6 +347,19 @@ function requireCardSuccess(response: { code?: number; msg?: string }): void {
   throw Object.assign(new Error(`CardKit API failed: code=${response.code ?? '?'} ${response.msg ?? ''}`), {
     code: response.code,
   });
+}
+
+/** Recognize explicit card/message capacity rejections, never generic transport errors. */
+function isCardSizeFailure(error: unknown): boolean {
+  const failure = error as {
+    code?: number | string;
+    data?: { code?: number };
+    response?: { data?: { code?: number } };
+    cause?: unknown;
+  } | undefined;
+  const code = Number(failure?.response?.data?.code ?? failure?.data?.code ?? failure?.code);
+  return code === 200860 || code === 230025
+    || Boolean(failure?.cause && failure.cause !== error && isCardSizeFailure(failure.cause));
 }
 
 /** Recognize SDK/HTTP and Feishu permission failures so finalization cannot bypass them. */

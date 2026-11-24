@@ -71,7 +71,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   });
 }
 
-/** Keep all commentary in one bounded process panel; only explicit final text is an answer. */
+/** Fold commentary and tool summaries without tool bodies; only explicit final text is an answer. */
 function foldedRunElements(state: RunState): object[] {
   // A turn can finish without an answer after emitting commentary and tools.
   // Promoting those blocks would unfold the process and bypass its size cap.
@@ -80,7 +80,9 @@ function foldedRunElements(state: RunState): object[] {
   if (state.reasoning.content.trim()) process.push(state.reasoning.content);
   for (const block of state.blocks) {
     if (block.kind === 'tool') {
-      process.push(`${toolHeaderText(block.tool)}\n\n${toolBodyMd(block.tool)}`);
+      // Match brief COT: keep the invocation and status, never raw tool output
+      // or detailed inputs such as file contents and command bodies.
+      process.push(toolHeaderText(block.tool));
     } else if (block.content.trim()) {
       process.push(block.content);
     }

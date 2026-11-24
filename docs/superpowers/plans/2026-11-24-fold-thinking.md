@@ -30,7 +30,7 @@
 
 **Interfaces:** `RunCardRenderOptions` 增加 `foldProgress?: boolean`、`streamingMode?: boolean`；`renderCard(state, options)` 保持原返回类型。
 
-- [x] 折叠过程与工具详情，单独展示 finalText；异常结束没有 finalText 时将已有文本保留在折叠过程内，终止提示放在面板外。
+- [x] 折叠过程与工具调用摘要，单独展示 finalText；异常结束没有 finalText 时将已有文本保留在折叠过程内，终止提示放在面板外。
 - [x] 保持既有 Claude 渲染路径；检查脱敏、过程长度和按钮签名（静态审阅）。
 
 ### Task 2: CardKit 发布与调度
@@ -61,3 +61,4 @@
 - 审阅建议删除授权识别中的 230002，未采纳：官方回复消息文档明确该码表示“机器人不在群中”，属资源可用性边界，不能当普通格式错误继续尝试其他 API。依据：https://open.feishu.cn/document/server-docs/im-v1/message/reply.md 。
 - 保留 Codex 事件翻译协议；没有 final_text 的终态不再展开全部过程。单卡片 30KB 是飞书平台限制，已在 README 明示。
 - 后续交付：官方 GitHub CLI 已安装，账号 `zbwang163` 授权成功并完成 Git 凭证配置；上游默认分支为 `main` 且只有 READ 权限。个人 fork 为 `zbwang163/lark-coding-agent-bridge`，`master` 保存原始快照 `98b5060`，功能分支 `codex/fold-thinking` 向该基线创建 PR。本次仍未编译、运行单测或部署。
+- 测试反馈修正：折叠面板误用 `toolBodyMd` 拼入完整工具详情，导致输出 SKILL 原文及命令结果。改为仅使用既有 `toolHeaderText`，保留名称、简短参数和状态；仅静态检查，不编译、运行单测或部署，不修改线上服务。

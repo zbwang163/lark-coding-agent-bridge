@@ -2,11 +2,9 @@ import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 
 /**
- * Add a "Typing" reaction (敲键盘) to a message to give text-mode users an
- * instant "I got your message and I'm responding" cue while Claude is still
- * thinking. Matches the conventional Feishu UX for "the other side is
- * replying". Card mode doesn't need this — the streaming card already
- * shows a "正在思考…" footer the moment it's posted.
+ * Add a "Typing" reaction (敲键盘) as an immediate acknowledgement while
+ * the agent prepares its reply. Codex cards are created lazily and need this
+ * cue too; callers decide whether another reply path already provides one.
  *
  * Returns the reaction id on success, undefined on any failure. Failures
  * are logged but never thrown — losing a decoration must not break the

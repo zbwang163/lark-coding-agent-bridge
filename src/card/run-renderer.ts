@@ -4,6 +4,7 @@ import { toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
+const PROCESS_MAX_BYTES = 8000;
 
 interface ToolGroup {
   kind: 'tools';
@@ -17,16 +18,21 @@ type Group = ToolGroup | TextGroup;
 
 export interface RunCardRenderOptions {
   signCallback?: (action: string) => string;
+  /** Codex keeps commentary in blocks and its answer in finalText. */
+  foldProgress?: boolean;
+  /** Long runs keep updating the entity after native streaming is closed. */
+  streamingMode?: boolean;
 }
 
+/** Render a run card, optionally folding Codex commentary around its final answer. */
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
-  const elements: object[] = [];
+  const elements: object[] = options.foldProgress ? foldedRunElements(state) : [];
 
-  if (state.reasoning.content) {
+  if (!options.foldProgress && state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
 
-  for (const group of groupBlocks(state.blocks)) {
+  for (const group of groupBlocks(options.foldProgress ? [] : state.blocks)) {
     if (group.kind === 'text') {
       if (group.content.trim()) {
         elements.push(markdown(group.content));
@@ -49,7 +55,8 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
 
   if (state.terminal === 'running') {
     if (state.footer) elements.push(footerStatus(state.footer));
-    elements.push(stopButton(options));
+    // Folded Codex cards show progress without an action button.
+    if (!options.foldProgress) elements.push(stopButton(options));
   }
 
   // Mask raw emails across every text field so the Feishu tenant audit doesn't
@@ -57,11 +64,79 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   return deepMaskEmails({
     schema: '2.0',
     config: {
-      streaming_mode: state.terminal === 'running',
+      streaming_mode: options.streamingMode ?? (state.terminal === 'running'),
+      ...(options.foldProgress ? { update_multi: true } : {}),
       summary: { content: summaryText(state) },
     },
     body: { elements },
   });
+}
+
+/** Fold commentary and tool summaries without tool bodies; only explicit final text is an answer. */
+function foldedRunElements(state: RunState): object[] {
+  // A turn can finish without an answer after emitting commentary and tools.
+  // Promoting those blocks would unfold the process and bypass its size cap.
+  const answer = state.finalText ?? '';
+  // Show live progress until an explicit answer arrives; terminal cards start
+  // collapsed so completed work does not obscure the answer or failure notice.
+  const processExpanded = state.terminal === 'running' && !answer.trim();
+  const process: string[] = [];
+  if (state.reasoning.content.trim()) process.push(state.reasoning.content.trim());
+  for (const group of groupBlocks(state.blocks)) {
+    if (group.kind === 'tools') {
+      // Match brief COT: keep the invocation and status, never raw tool output
+      // or detailed inputs. Consecutive calls share a compact list so each
+      // tool does not introduce another empty paragraph.
+      process.push(group.tools.map((tool) => `- ${toolHeaderText(tool)}`).join('\n'));
+    } else if (group.content.trim()) {
+      // Agent messages may already end in newlines; only the join below adds
+      // paragraph spacing, preserving Markdown within each message.
+      process.push(group.content.trim());
+    }
+  }
+  const elements: object[] = [];
+  if (process.length > 0) {
+    // Reserve room for JSON framing and the answer within the card's 30KB cap.
+    // Only process details are shortened; the actual answer is never truncated.
+    const budget = Math.max(0, Math.min(PROCESS_MAX_BYTES,
+      24000 - Buffer.byteLength(JSON.stringify(answer), 'utf8')));
+    elements.push({
+      tag: 'collapsible_panel',
+      element_id: 'run_process',
+      expanded: processExpanded,
+      header: panelHeader(state.terminal === 'running'
+        ? `🧠 **执行过程（点击${processExpanded ? '收起' : '展开'}）**`
+        : '🧠 **执行过程（已结束，点击展开）**'),
+      border: { color: 'grey', corner_radius: '5px' },
+      padding: '8px',
+      elements: [{
+        tag: 'markdown',
+        element_id: 'run_process_text',
+        content: truncateProcess(process.join('\n\n'), budget),
+        text_size: 'notation',
+      }],
+    });
+  }
+  if (answer.trim()) {
+    elements.push({ tag: 'markdown', element_id: 'run_answer', content: answer });
+  } else if (state.terminal === 'done') {
+    elements.push(noteMd('_（未返回答案）_'));
+  }
+  return elements;
+}
+
+/** Bound serialized process text by UTF-8 bytes without cutting a Unicode character. */
+function truncateProcess(content: string, maxBytes: number): string {
+  if (Buffer.byteLength(JSON.stringify(content), 'utf8') <= maxBytes) return content;
+  const suffix = '\n\n_（过程已截断，完整内容请查看本地会话记录）_';
+  let budget = maxBytes - Buffer.byteLength(JSON.stringify(suffix), 'utf8');
+  const chars: string[] = [];
+  for (const char of content) {
+    budget -= Buffer.byteLength(JSON.stringify(char), 'utf8') - 2;
+    if (budget < 0) break;
+    chars.push(char);
+  }
+  return chars.join('') + suffix;
 }
 
 function* groupBlocks(blocks: Block[]): Generator<Group> {

@@ -152,7 +152,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/invite group` | Allow the current group to use the bot |
 | `/invite all group` | Allow all groups the bot has joined |
 | `/remove user @name`, `/remove admin @name`, `/remove group` | Remove access entries |
-| `/stop` | Stop the current run, including the card stop button |
+| `/stop` | Stop the current run; Claude cards also offer a stop button |
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
 | `/ps` | List local bridge processes |
 | `/exit <id\|#>` | Stop a bridge process |
@@ -172,9 +172,11 @@ In an ordinary group, every top-level user question is promoted to a Feishu/Lark
 - **Tool-call display**: controls whether tool blocks appear in the final card / markdown reply.
 - **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
 
-When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
+Codex normally sends one CardKit card per turn in `card` / `markdown` reply modes. An initial thinking card starts sending as soon as an agent request is accepted, without waiting for model output. Public commentary and tool summaries update that same card; web search, MCP, dynamic tools and file-change events release pending commentary instead of holding it until the final answer. Internal reasoning and new tool result bodies are not displayed. The process panel is expanded while the agent works and collapses when the answer arrives or the run ends. Oversized answers use Markdown continuation messages, retaining at most one status/process card and never truncating the answer to fit it. Codex does not send a separate COT message. Explicit `text` mode sends only the final result after the run. Tool visibility preferences still apply. Folding changes only the UI; raw card data and context extraction still include the process content.
 
-For the first answer to an ordinary-group root question, the bridge uses the normal threaded reply even when COT is enabled, because Feishu/Lark's COT API cannot create a topic from a root message. COT is available again for follow-ups inside the generated topic.
+The Codex card requires `cardkit:card:write`, the existing message-send permissions, and a JSON 2.0-capable client (Feishu 7.20+). Process details are shortened to fit the card budget. If the rendered card exceeds 28000 UTF-8 bytes, or Feishu explicitly rejects its size, the complete final answer is split into byte-bounded native Markdown posts, including long lines and ordinary fenced code blocks. Existing email masking and thread reply targets apply to continuation messages. Each part has a fixed UUID; delivery never falls back to a group-root message. Permission failures stop delivery; a partially failed continuation is not automatically restarted from its first chunk. Native streaming is explicitly closed at completion, or before its time limit for long runs; subsequent process updates keep using the same entity.
+
+Claude retains separate process and answer messages when COT is enabled. The process view traces the agent's work, while the final answer comes from the agent's raw text without heuristic filtering. The first answer to an ordinary-group root uses a normal threaded reply because the COT API cannot create a topic from a root message; follow-ups inside that topic can use COT.
 
 ## lark-cli identity policy
 

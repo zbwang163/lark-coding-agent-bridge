@@ -59,6 +59,7 @@ import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
+import { RunCardPublisher } from './run-card';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { resolveImConversation } from './im-conversation';
 import { startKeepalive } from './keepalive';
@@ -1048,13 +1049,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const replyMode = getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
   const cotMessages = getCotMessages(controls.cfg);
+  const codexRun = controls.profileConfig.agentKind === 'codex';
   // message_cot cannot promote an ordinary-group root message into a topic.
   // Use the normal reply path for that first answer; once inside the generated
   // topic, follow-ups can use COT without escaping to the group top level.
   const cotEnabled =
-    cotMessages !== 'off' && !(baseMode === 'group' && !threadId);
+    !codexRun && cotMessages !== 'off' && !(baseMode === 'group' && !threadId);
   if (cotMessages !== 'off' && !cotEnabled) {
-    log.info('cot', 'disabled-for-ordinary-group-root', { scope });
+    // Codex owns one reply card (or one final text), so a separate COT
+    // bubble would reintroduce the duplicate process message.
+    log.info('cot', codexRun ? 'folded-into-run-card' : 'disabled-for-ordinary-group-root', { scope });
   }
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
@@ -1078,14 +1082,46 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     : {};
 
-  // For non-card modes Claude's output doesn't surface visually until either
-  // a first streamed token (markdown mode) or the whole run ends (text mode).
-  // Add a "Typing" reaction to the triggering message as an instant ack, but
-  // never let that outbound API call block agent event draining.
+  // Acknowledge Codex immediately while its initial status card is being sent.
+  // Preserve Claude's existing COT/card behavior and never block event draining
+  // on the reaction API; the shared finally block cleans it up for all modes.
   const reactionPromise =
-    cotEnabled || replyMode === 'card' ? undefined : addWorkingReaction(channel, lastMsg.messageId);
+    !codexRun && (cotEnabled || replyMode === 'card')
+      ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
   try {
+    // Codex's commentary and final_text belong to one entity in both visual
+    // reply modes. Preserve text mode as a single non-streaming final reply.
+    if (codexRun && replyMode !== 'text') {
+      const publisher = new RunCardPublisher({
+        channel, chatId, scope, sendOpts, renderOptions: cardRenderOptions,
+      });
+      let latestState = initialState;
+      /** Project current tool preferences before publishing each state to the same card. */
+      async function publishRunCardState(state: RunState): Promise<void> {
+        latestState = state;
+        await publisher.update(filterForPrefs(state));
+      }
+      try {
+        // Initial delivery and agent consumption start concurrently; updates
+        // and completion reuse this publisher's entity and operation queue.
+        void publisher.begin();
+        latestState = await processAgentStream(
+          handle, eventStream, scope, idleTimeoutMs, recordSession, publishRunCardState,
+        );
+      } catch (error) {
+        // Unexpected event-stream failures still close and finalize the card.
+        latestState = {
+          ...latestState, terminal: 'error', footer: null,
+          errorMsg: error instanceof Error ? error.message : 'Agent 事件流异常',
+        };
+        throw error;
+      } finally {
+        await publisher.finish(filterForPrefs(latestState));
+      }
+      return;
+    }
+
     if (cotEnabled) {
       const cotPublisher = new CotPublisher({
         client: cotClient,

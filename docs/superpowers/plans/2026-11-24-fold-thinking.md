@@ -62,3 +62,4 @@
 - 保留 Codex 事件翻译协议；没有 final_text 的终态不再展开全部过程。单卡片 30KB 是飞书平台限制，已在 README 明示。
 - 后续交付：官方 GitHub CLI 已安装，账号 `zbwang163` 授权成功并完成 Git 凭证配置；上游默认分支为 `main` 且只有 READ 权限。个人 fork 为 `zbwang163/lark-coding-agent-bridge`，`master` 保存原始快照 `98b5060`，功能分支 `codex/fold-thinking` 向该基线创建 PR。本次仍未编译、运行单测或部署。
 - 测试反馈修正：折叠面板误用 `toolBodyMd` 拼入完整工具详情，导致输出 SKILL 原文及命令结果。改为仅使用既有 `toolHeaderText`，保留名称、简短参数和状态；仅静态检查，不编译、运行单测或部署，不修改线上服务。
+- 测试反馈继续修正：Codex 卡片路径恢复异步 Typing 表情及既有结束清理；过程段落去掉首尾空白，复用 `groupBlocks` 将连续工具调用合并为紧凑列表，避免逐工具插入空段落。用户已要求测试机器人生效，后续只更新独立测试构建，不触碰生产服务，不运行单测。

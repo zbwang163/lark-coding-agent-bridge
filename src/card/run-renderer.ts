@@ -77,14 +77,17 @@ function foldedRunElements(state: RunState): object[] {
   // Promoting those blocks would unfold the process and bypass its size cap.
   const answer = state.finalText ?? '';
   const process: string[] = [];
-  if (state.reasoning.content.trim()) process.push(state.reasoning.content);
-  for (const block of state.blocks) {
-    if (block.kind === 'tool') {
+  if (state.reasoning.content.trim()) process.push(state.reasoning.content.trim());
+  for (const group of groupBlocks(state.blocks)) {
+    if (group.kind === 'tools') {
       // Match brief COT: keep the invocation and status, never raw tool output
-      // or detailed inputs such as file contents and command bodies.
-      process.push(toolHeaderText(block.tool));
-    } else if (block.content.trim()) {
-      process.push(block.content);
+      // or detailed inputs. Consecutive calls share a compact list so each
+      // tool does not introduce another empty paragraph.
+      process.push(group.tools.map((tool) => `- ${toolHeaderText(tool)}`).join('\n'));
+    } else if (group.content.trim()) {
+      // Agent messages may already end in newlines; only the join below adds
+      // paragraph spacing, preserving Markdown within each message.
+      process.push(group.content.trim());
     }
   }
   const elements: object[] = [];

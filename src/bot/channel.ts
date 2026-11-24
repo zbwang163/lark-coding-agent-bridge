@@ -1082,12 +1082,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     : {};
 
-  // For non-card modes Claude's output doesn't surface visually until either
-  // a first streamed token (markdown mode) or the whole run ends (text mode).
-  // Add a "Typing" reaction to the triggering message as an instant ack, but
-  // never let that outbound API call block agent event draining.
+  // Codex creates its card lazily, so every reply mode needs an immediate ack.
+  // Preserve Claude's existing COT/card behavior and never block event draining
+  // on the reaction API; the shared finally block cleans it up for all modes.
   const reactionPromise =
-    cotEnabled || replyMode === 'card' || (codexRun && replyMode !== 'text')
+    !codexRun && (cotEnabled || replyMode === 'card')
       ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
   try {

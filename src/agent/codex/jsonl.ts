@@ -14,6 +14,7 @@ export class CodexJsonlTranslator {
   private lastNonTerminalError: string | undefined;
   private pendingAgentMessage: string | undefined;
   private readonly startedItems = new Set<string>();
+  private readonly completedItems = new Set<string>();
   private drift: ProtocolDriftState = {
     unknownEvents: 0,
     anomalies: 0,
@@ -96,27 +97,29 @@ export class CodexJsonlTranslator {
     return [{ type: 'system', threadId }];
   }
 
+  /** Map known public tool starts so they can release preceding commentary promptly. */
   private translateItemStarted(raw: Record<string, unknown>): AgentEvent[] {
     const item = recordValue(raw.item);
-    if (!item || item.type !== 'command_execution') return [];
+    const tool = item && toolDetailsForItem(item);
+    if (!item || !tool) return [];
     const id = stringValue(item.id);
     if (!id) {
       this.drift.anomalies++;
       return [];
     }
+    // Duplicate lifecycle notifications must not repeat a tool or its progress.
+    if (this.startedItems.has(id) || this.completedItems.has(id)) return [];
     this.startedItems.add(id);
     return [
       {
         type: 'tool_use',
         id,
-        name: 'command_execution',
-        input: {
-          command: stringValue(item.command) ?? '',
-        },
+        ...tool,
       },
     ];
   }
 
+  /** Complete known tools without exposing new tool result bodies or internal reasoning. */
   private translateItemCompleted(raw: Record<string, unknown>): AgentEvent[] {
     const item = recordValue(raw.item);
     if (!item) return [];
@@ -124,25 +127,35 @@ export class CodexJsonlTranslator {
       const message = stringValue(item.text ?? item.message);
       return message ? this.queueAgentMessage(message) : [];
     }
-    if (item.type !== 'command_execution') return [];
+    const tool = toolDetailsForItem(item);
+    if (!tool) return [];
     const id = stringValue(item.id);
     if (!id) {
       this.drift.anomalies++;
       return [];
     }
+    if (this.completedItems.has(id)) return [];
+    const events: AgentEvent[] = [];
     if (!this.startedItems.has(id)) {
       this.drift.anomalies++;
+      // New tool types may emit completion alone. Preserve the existing
+      // command-only anomaly contract while adding their missing summary.
+      if (item.type !== 'command_execution') events.push({ type: 'tool_use', id, ...tool });
     }
     this.startedItems.delete(id);
+    this.completedItems.add(id);
     const exitCode = numberValue(item.exit_code);
-    return this.prependPendingText([
-      {
-        type: 'tool_result',
-        id,
-        output: stringValue(item.output ?? item.aggregated_output ?? item.stdout) ?? '',
-        isError: exitCode !== undefined && exitCode !== 0,
-      },
-    ]);
+    events.push({
+      type: 'tool_result',
+      id,
+      // Existing command output remains available locally. New tools expose
+      // status only here, never search results, MCP responses or file diffs.
+      output: item.type === 'command_execution'
+        ? stringValue(item.output ?? item.aggregated_output ?? item.stdout) ?? '' : '',
+      isError: item.type === 'command_execution' ? exitCode !== undefined && exitCode !== 0
+        : item.status === 'failed' || item.status === 'error' || Boolean(item.error),
+    });
+    return this.prependPendingText(events);
   }
 
   private translateAgentMessage(raw: Record<string, unknown>): AgentEvent[] {
@@ -212,6 +225,41 @@ export class CodexJsonlTranslator {
     this.lastNonTerminalError = message;
     log.warn('jsonl', 'error_event', { message: truncate(message, 500) });
     return [];
+  }
+}
+
+/** Whitelist public tool summaries; reasoning and unknown items cannot flush a final-answer candidate. */
+function toolDetailsForItem(item: Record<string, unknown>): { name: string; input: unknown } | undefined {
+  switch (item.type) {
+    case 'command_execution':
+      return { name: 'command_execution', input: { command: stringValue(item.command) ?? '' } };
+    case 'web_search': {
+      const action = recordValue(item.action);
+      return {
+        name: 'web_search',
+        input: { query: stringValue(item.query) || stringValue(action?.query) || stringValue(action?.url) || '' },
+      };
+    }
+    case 'mcp_tool_call': {
+      const name = stringValue(item.tool) ?? 'mcp_tool_call';
+      const server = stringValue(item.server);
+      return { name: server ? `${server}.${name}` : name, input: recordValue(item.arguments) ?? {} };
+    }
+    case 'dynamic_tool_call':
+      return {
+        name: stringValue(item.tool) ?? stringValue(item.name) ?? 'dynamic_tool_call',
+        input: recordValue(item.arguments) ?? {},
+      };
+    case 'file_change': {
+      const paths: string[] = [];
+      for (const change of Array.isArray(item.changes) ? item.changes : []) {
+        const path = stringValue(recordValue(change)?.path);
+        if (path) paths.push(path);
+      }
+      return { name: 'file_change', input: { path: paths.join(', ') } };
+    }
+    default:
+      return undefined;
   }
 }
 

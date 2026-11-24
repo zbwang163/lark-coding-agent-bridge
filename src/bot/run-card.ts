@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import { maskEmails } from '../card/mask-email';
 import { splitMarkdown } from '../card/split-markdown';
-import type { RunState } from '../card/run-state';
+import { initialState, type RunState } from '../card/run-state';
 import { log } from '../core/logger';
 
 const UPDATE_INTERVAL_MS = 750;
@@ -37,10 +37,33 @@ export class RunCardPublisher {
   private latestState: RunState | undefined;
   private finishing = false;
   private finalization: Promise<void> | undefined;
+  private initialDelivery: Promise<void> | undefined;
   private readonly answerUuid = randomUUID();
 
   /** Retain the existing reply target and signed rendering options for this run. */
   constructor(private readonly options: RunCardPublisherOptions) {}
+
+  /** Begin one thinking card without waiting for model output or blocking event consumption. */
+  begin(): Promise<void> {
+    if (!this.initialDelivery) {
+      this.initialDelivery = this.enqueue(this.publishInitial.bind(this))
+        .catch(this.recordFailure.bind(this));
+    }
+    return this.initialDelivery;
+  }
+
+  /** Create the initial status in the same queue used by all later updates and finalization. */
+  private async publishInitial(): Promise<void> {
+    // A fast final answer may already be queued; finish owns delivery then.
+    if (this.finishing || this.cardId || this.deliveryError) return;
+    try {
+      await this.start(initialState);
+      this.lastUpdateAt = Date.now();
+    } catch (error) {
+      // Latch permission failures before releasing the queue to another update.
+      this.recordFailure(error);
+    }
+  }
 
   /** Serialize event-driven publishing with the independent streaming deadline. */
   update(state: RunState): Promise<void> {
@@ -101,6 +124,9 @@ export class RunCardPublisher {
 
   /** Keep ordinary answers in one card and route oversized answers through bounded continuation. */
   private async finalize(state: RunState): Promise<void> {
+    // An in-flight initial create can install its timer after finish() was
+    // requested. Clear again inside the queue, after that create has settled.
+    this.clearTimers();
     // No alternate delivery path may continue after a permission failure.
     if (this.blocked) throw this.deliveryError;
     const hasAnswer = Boolean(state.finalText?.trim());

@@ -1082,7 +1082,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     : {};
 
-  // Codex creates its card lazily, so every reply mode needs an immediate ack.
+  // Acknowledge Codex immediately while its initial status card is being sent.
   // Preserve Claude's existing COT/card behavior and never block event draining
   // on the reaction API; the shared finally block cleans it up for all modes.
   const reactionPromise =
@@ -1103,6 +1103,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         await publisher.update(filterForPrefs(state));
       }
       try {
+        // Initial delivery and agent consumption start concurrently; updates
+        // and completion reuse this publisher's entity and operation queue.
+        void publisher.begin();
         latestState = await processAgentStream(
           handle, eventStream, scope, idleTimeoutMs, recordSession, publishRunCardState,
         );

@@ -138,7 +138,8 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | Command | Effect |
 |---|---|
 | `/new`, `/reset` | Clear the current session |
-| `/cd <path>` | Switch working directory and reset the session |
+| `/cd <path>` | Change the group default in ordinary groups, or the current scope elsewhere |
+| `/cd --group <path>` | Set the default working directory inherited by new topics in the group |
 | `/ws list` | List named workspaces |
 | `/ws save <name>` | Save the current working directory as a named workspace |
 | `/ws use <name>` | Switch to a named workspace |
@@ -161,6 +162,8 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
+In an ordinary group, every top-level user question is promoted to a Feishu/Lark topic, and that root question owns an independent session. Follow-ups inside the generated topic resume the same session. A top-level slash command is handled in place and does not create a topic; when invoked inside an existing topic, its reply stays there.
+
 ## Reply Display and COT
 
 `/config` controls three presentation settings:
@@ -170,6 +173,8 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 - **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
 
 When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
+
+For the first answer to an ordinary-group root question, the bridge uses the normal threaded reply even when COT is enabled, because Feishu/Lark's COT API cannot create a topic from a root message. COT is available again for follow-ups inside the generated topic.
 
 ## lark-cli identity policy
 
@@ -192,6 +197,8 @@ This is a profile-field snippet. Do not replace the whole `config.json` with it;
 ```
 
 The bridge checks that a selected directory exists, is a directory, and is not an overly broad location such as `/`, the home root, a system directory, or a temp root. The working directory is only the current directory for an agent run. It is not a filesystem sandbox; actual file access still depends on the local agent process and its permission mode.
+
+In a topic group, `/cd <path>` applies only to the current topic. `/cd --group <path>` changes the group default for topics first used afterwards; topics already used by the bot keep their snapshotted working directory and session. In an ordinary group, `/cd <path>` and `/cd --group <path>` are equivalent and both change the group default. Topic sessions remain independent even when they share a working directory. The group-wide form is not available in direct messages.
 
 ## Permission modes
 

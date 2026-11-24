@@ -35,6 +35,13 @@ export class WorkspaceStore {
     return this.data.chats[chatId]?.cwd;
   }
 
+  cwdForScope(scopeId: string, groupScopeId?: string): string | undefined {
+    return (
+      this.cwdFor(scopeId) ??
+      (groupScopeId && groupScopeId !== scopeId ? this.cwdFor(groupScopeId) : undefined)
+    );
+  }
+
   setCwd(chatId: string, cwd: string): void {
     this.data.chats[chatId] = { cwd };
     this.schedulePersist();

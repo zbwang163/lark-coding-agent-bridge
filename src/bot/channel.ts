@@ -60,11 +60,12 @@ import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
+import { resolveImConversation } from './im-conversation';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
-import { lookupMessageThreadId } from './thread-id';
+import { lookupMessageThreadContext } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -217,16 +218,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
     appSecret,
   });
-  const threadModeOverrideWarnedChats = new Set<string>();
-  const logThreadModeOverride: LogThreadModeOverride = ({ chatId, resolvedMode, threadId }) => {
-    const fields = { chatId, cachedMode: resolvedMode, threadId };
-    if (threadModeOverrideWarnedChats.has(chatId)) {
-      log.info('chat', 'mode-overridden-by-thread', fields);
-      return;
-    }
-    threadModeOverrideWarnedChats.add(chatId);
-    log.warn('chat', 'mode-overridden-by-thread', fields);
-  };
+  // A thread can now be native to an ordinary group, so threadId alone cannot
+  // override the chat API mode. Re-probe once per group to catch a real
+  // group-to-topic conversion without invalidating the cache on every reply.
+  const threadModeProbedChats = new Set<string>();
 
   const opts: LarkChannelOptions = {
     appId: cfg.accounts.app.id,
@@ -291,19 +286,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       });
       try {
         const resolvedMode = await chatModeCache.resolve(channel, firstMsg.chatId);
-        // Feishu/Lark converted topic groups may still resolve as `group` from
-        // the chat info API/cache, while message events already carry threadId.
-        // Treat threadId as authoritative for IM messages so scope and replies
-        // stay isolated per topic.
-        const mode = firstMsg.threadId ? 'topic' : resolvedMode;
-        if (firstMsg.threadId && resolvedMode !== 'topic') {
-          chatModeCache.invalidate(firstMsg.chatId);
-          logThreadModeOverride({
-            chatId: firstMsg.chatId,
-            resolvedMode,
-            threadId: firstMsg.threadId,
-          });
-        }
+        const route = resolveImConversation(firstMsg, resolvedMode);
         await runAgentBatch({
           channel,
           executor,
@@ -318,7 +301,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           activePolicyFingerprints,
           lastRunModelByScope,
           scope,
-          mode,
+          mode: route.mode,
+          baseMode: route.baseMode,
+          replyInThread: route.replyInThread,
         });
       } catch (err) {
         log.fail('flush', err);
@@ -346,7 +331,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           msg,
           controls,
           chatModeCache,
-          logThreadModeOverride,
+          threadModeProbedChats,
           executor,
           pool,
         }),
@@ -622,16 +607,10 @@ interface IntakeDeps {
   msg: NormalizedMessage;
   controls: Controls;
   chatModeCache: ChatModeCache;
-  logThreadModeOverride: LogThreadModeOverride;
+  threadModeProbedChats: Set<string>;
   executor: RunExecutor;
   pool: ProcessPool;
 }
-
-type LogThreadModeOverride = (input: {
-  chatId: string;
-  resolvedMode: ChatMode;
-  threadId: string;
-}) => void;
 
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
@@ -645,14 +624,32 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     msg,
     controls,
     chatModeCache,
-    logThreadModeOverride,
+    threadModeProbedChats,
     executor,
     pool,
   } = deps;
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
-  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  let resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  if (
+    msg.threadId &&
+    resolvedMode === 'group' &&
+    !threadModeProbedChats.has(msg.chatId)
+  ) {
+    threadModeProbedChats.add(msg.chatId);
+    chatModeCache.invalidate(msg.chatId);
+    const refreshedMode = await chatModeCache.resolve(channel, msg.chatId);
+    if (refreshedMode !== resolvedMode) {
+      log.info('chat', 'mode-changed-after-thread-probe', {
+        chatId: msg.chatId,
+        previousMode: resolvedMode,
+        refreshedMode,
+        threadId: msg.threadId,
+      });
+    }
+    resolvedMode = refreshedMode;
+  }
   // Feishu delivers a sizable fraction of topic-group message events without a
   // `thread_id` (notably the message that opens a new topic). We route topic
   // replies (`replyInThread`) and isolate per-topic session scope off it, so a
@@ -661,8 +658,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // the event dropped `thread_id`, backfill it from the raw message — the same
   // recovery the card-click path uses.
   let threadId = msg.threadId;
-  if (!threadId && resolvedMode === 'topic') {
-    threadId = await lookupMessageThreadId(channel, msg.messageId);
+  let rootId = msg.rootId;
+  if (
+    (!threadId && resolvedMode === 'topic') ||
+    (threadId && resolvedMode === 'group' && !rootId)
+  ) {
+    const context = await lookupMessageThreadContext(channel, msg.messageId);
+    threadId ??= context.threadId;
+    rootId ??= context.rootId;
     if (threadId) {
       log.info('intake', 'thread-id-backfilled', {
         chatId: msg.chatId,
@@ -674,22 +677,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Carry the (possibly backfilled) threadId on the message so the batched
   // flush — which reads `firstMsg.threadId` for reply routing and topic scope —
   // sees it.
-  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
-  // Some groups are converted into topic groups after creation. In that state
-  // getChatMode can lag behind the message event shape, so threadId is the
-  // stronger signal for topic-scoped sessions and reply routing.
-  const chatMode = threadId ? 'topic' : resolvedMode;
-  if (threadId && resolvedMode !== 'topic') {
-    chatModeCache.invalidate(msg.chatId);
-    logThreadModeOverride({
-      chatId: msg.chatId,
-      resolvedMode,
-      threadId,
-    });
-  }
-  const scope = chatMode === 'topic' && threadId
-    ? `${msg.chatId}:${threadId}`
-    : msg.chatId;
+  const emsg: NormalizedMessage =
+    threadId === msg.threadId && rootId === msg.rootId
+      ? msg
+      : { ...msg, threadId, rootId };
+  const route = resolveImConversation(emsg, resolvedMode);
+  const chatMode = route.mode;
+  const scope = route.scope;
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -760,6 +754,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     msg: emsg,
     scope,
     chatMode,
+    baseChatMode: route.baseMode,
     sessions,
     workspaces,
     agent,
@@ -802,6 +797,8 @@ interface RunBatchDeps {
   lastRunModelByScope: Map<string, string>;
   scope: string;
   mode: ChatMode;
+  baseMode: ChatMode;
+  replyInThread: boolean;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -820,6 +817,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     lastRunModelByScope,
     scope,
     mode,
+    baseMode,
+    replyInThread,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -929,16 +928,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
   });
 
-  // For topic groups: thread the reply so it lands in the same topic as the
-  // user's message. Otherwise the SDK posts at top level and the user's
-  // topic discussion breaks visually.
+  // Native topic groups keep replies in their existing topic. A root question
+  // in an ordinary group is promoted into a topic by reply_in_thread=true;
+  // later replies in that topic use the same option and root-scoped session.
   const sendOpts = {
     replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    ...(replyInThread ? { replyInThread: true } : {}),
   };
   log.info('flush', 'reply-target', {
     scope,
     mode,
+    baseMode,
     chatId,
     threadId,
     replyTo: sendOpts.replyTo,
@@ -953,7 +953,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     source: 'im',
     chatId,
     actorId: firstMsg.senderId,
-    ...(threadId ? { threadId } : {}),
+    // An ordinary-group root acquires a Feishu threadId only after our first
+    // reply promotes it into a topic. Including that late-bound id would change
+    // the policy fingerprint and split one logical conversation into two agent
+    // sessions. Native topic groups have a stable threadId from the start and
+    // still use it as part of their resource boundary.
+    ...(baseMode === 'topic' && threadId ? { threadId } : {}),
   };
   const capability =
     controls.profileConfig.agentKind === 'codex'
@@ -1043,7 +1048,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const replyMode = getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
   const cotMessages = getCotMessages(controls.cfg);
-  const cotEnabled = cotMessages !== 'off';
+  // message_cot cannot promote an ordinary-group root message into a topic.
+  // Use the normal reply path for that first answer; once inside the generated
+  // topic, follow-ups can use COT without escaping to the group top level.
+  const cotEnabled =
+    cotMessages !== 'off' && !(baseMode === 'group' && !threadId);
+  if (cotMessages !== 'off' && !cotEnabled) {
+    log.info('cot', 'disabled-for-ordinary-group-root', { scope });
+  }
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
   // effect immediately. Cheap object lookups, no allocation when on.

@@ -9,15 +9,14 @@ export type ChatMode = 'p2p' | 'group' | 'topic';
  * Why: chat mode (`p2p` / `group` / `topic`) doesn't change within a chat's
  * lifetime under normal use, and the SDK doesn't expose it on the message
  * event — so we cache by chatId to avoid an `im.v1.chat.get` round-trip per
- * message. Admins can still convert a regular group into a topic group: the
- * channel layer treats a message-level `threadId` as authoritative and calls
- * `invalidate(chatId)` whenever a cached non-topic answer is contradicted, so
- * the next resolve re-probes and a stale `group` entry can't outlive one
- * message.
+ * message. A `threadId` is valid in both ordinary and topic groups, so the
+ * channel layer re-probes a cached group once when its first threaded message
+ * arrives. This detects a real group-to-topic conversion without invalidating
+ * ordinary-group cache entries on every follow-up.
  *
  * On lookup failure (network / permission / unknown chatId) we **fall back
  * to 'group'** — that's the conservative default since it means "treat as
- * a normal chat, one session per chatId, no thread split". Doesn't crash.
+ * an ordinary group". Doesn't crash.
  */
 export class ChatModeCache {
   private readonly cache = new Map<string, ChatMode>();

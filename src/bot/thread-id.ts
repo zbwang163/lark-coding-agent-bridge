@@ -16,22 +16,37 @@ import { log } from '../core/logger';
  * NormalizedMessage path rebuilds a synthetic raw event without `thread_id`, so
  * threadId always comes back undefined.
  *
- * Returns `undefined` on any error or when the message genuinely has no thread
- * (callers fall back to chat-level routing).
+ * Returns an empty context on error. Callers fall back to chat-level routing
+ * when the identifier required by their chat mode is absent.
  */
-export async function lookupMessageThreadId(
+export interface MessageThreadContext {
+  threadId?: string;
+  rootId?: string;
+}
+
+export async function lookupMessageThreadContext(
   channel: LarkChannel,
   messageId: string,
-): Promise<string | undefined> {
+): Promise<MessageThreadContext> {
   try {
     const [parent] = await channel.fetchRawMessage(messageId);
-    // ApiMessageItem's SDK type omits thread_id even though the API returns it.
-    return (parent as { thread_id?: string } | undefined)?.thread_id;
+    // ApiMessageItem's SDK type omits these fields even though the API returns
+    // them. Ordinary-group topics are scoped by root_id; native topic groups
+    // continue to use thread_id.
+    const raw = parent as { thread_id?: string; root_id?: string } | undefined;
+    return { threadId: raw?.thread_id, rootId: raw?.root_id };
   } catch (err) {
     log.warn('thread', 'thread-id-lookup-failed', {
       messageId,
       err: err instanceof Error ? err.message : String(err),
     });
-    return undefined;
+    return {};
   }
+}
+
+export async function lookupMessageThreadId(
+  channel: LarkChannel,
+  messageId: string,
+): Promise<string | undefined> {
+  return (await lookupMessageThreadContext(channel, messageId)).threadId;
 }

@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
+import { SessionCatalog } from '../../../src/session/catalog.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
@@ -72,6 +73,175 @@ afterEach(async () => {
 });
 
 describe('topic message quote handling', () => {
+  it('promotes each ordinary-group root question into its own topic session', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      agentEvents: [
+        { type: 'system', sessionId: 'sess-root' },
+        { type: 'text', delta: '好的' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+    const workspace = await realpath(h.tmp.workspace);
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_question_a',
+        rootId: 'om_question_a',
+        parentId: 'om_question_a',
+        content: '@Bridge 问题 A',
+      }),
+    );
+    await waitFor(() => h.channel.streams.length === 1);
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_question_b',
+        rootId: 'om_question_b',
+        parentId: 'om_question_b',
+        content: '@Bridge 问题 B',
+      }),
+    );
+    await waitFor(() => h.channel.streams.length === 2);
+
+    expect(h.channel.streams[0]?.options).toMatchObject({
+      replyTo: 'om_question_a',
+      replyInThread: true,
+    });
+    expect(h.channel.streams[1]?.options).toMatchObject({
+      replyTo: 'om_question_b',
+      replyInThread: true,
+    });
+    expect(h.agent.runOptions[0]?.sessionId).toBeUndefined();
+    expect(h.agent.runOptions[1]?.sessionId).toBeUndefined();
+    expect(h.sessions.resumeFor('oc_topic_chat:om_question_a', workspace)).toBe('sess-root');
+    expect(h.sessions.resumeFor('oc_topic_chat:om_question_b', workspace)).toBe('sess-root');
+  });
+
+  it('resumes an ordinary-group topic by its root message id', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      agentEvents: [{ type: 'done', terminationReason: 'normal' }],
+    });
+    const workspace = await realpath(h.tmp.workspace);
+    h.sessions.set('oc_topic_chat:om_question_root', 'sess-existing', workspace);
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_followup',
+        rootId: 'om_question_root',
+        parentId: 'om_question_root',
+        threadId: 'omt_created_topic',
+        content: '@Bridge 继续',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    expect(h.agent.runOptions[0]?.sessionId).toBe('sess-existing');
+  });
+
+  it('resumes the same session after a quoted ordinary-group question opens a topic', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      quotedMessages: {
+        om_quote_target: 'employee screenshot',
+      },
+      agentEvents: [
+        { type: 'system', sessionId: 'sess-quoted-question' },
+        { type: 'text', delta: 'Please confirm the RPC call.' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_quoted_question',
+        rootId: 'om_quote_target',
+        parentId: 'om_quote_target',
+        content: '@Bridge 看下这个员工',
+      }),
+    );
+    await waitFor(() => h.channel.streams.length === 1);
+
+    h.agent.setEvents([{ type: 'done', terminationReason: 'normal' }]);
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_confirm',
+        rootId: 'om_quoted_question',
+        parentId: 'om_quoted_question',
+        threadId: 'omt_generated_topic',
+        content: '@Bridge 确认',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    expect(h.agent.runOptions[0]?.sessionId).toBeUndefined();
+    expect(h.agent.runOptions[1]?.sessionId).toBe('sess-quoted-question');
+  });
+
+  it('resumes the same Codex thread after an ordinary-group question opens a topic', async () => {
+    const h = await createHarness({
+      agentKind: 'codex',
+      chatMode: 'group',
+      agentEvents: [
+        { type: 'system', threadId: 'codex-thread-root' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_codex_question',
+        rootId: 'om_codex_question',
+        parentId: 'om_codex_question',
+        content: '@Bridge Codex 问题',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    h.agent.setEvents([{ type: 'done', terminationReason: 'normal' }]);
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_codex_followup',
+        rootId: 'om_codex_question',
+        parentId: 'om_codex_question',
+        threadId: 'omt_generated_codex_topic',
+        content: '@Bridge Codex 继续',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    expect(h.agent.runOptions[0]?.threadId).toBeUndefined();
+    expect(h.agent.runOptions[1]?.threadId).toBe('codex-thread-root');
+  });
+
+  it('keeps ordinary-group slash command replies flat', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_command',
+        rootId: 'om_command',
+        parentId: 'om_command',
+        content: '/new',
+      }),
+    );
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_command' });
+    expect(h.channel.sent[0]?.options).not.toMatchObject({ replyInThread: true });
+    expect(h.agent.runOptions).toHaveLength(0);
+  });
+
   it('does not quote the topic root when a user directly mentions the bot inside the topic', async () => {
     const h = await createHarness();
 
@@ -465,6 +635,7 @@ describe('merge_forward fetch failure', () => {
 });
 
 async function createHarness(options: {
+  agentKind?: 'claude' | 'codex';
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
@@ -475,6 +646,7 @@ async function createHarness(options: {
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
   agent: FakeAgentAdapter;
   sessions: SessionStore;
+  sessionCatalog: SessionCatalog;
   workspaces: WorkspaceStore;
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   controls: ReturnType<typeof createControls>;
@@ -482,7 +654,7 @@ async function createHarness(options: {
   const tmp = await createTmpProfile('topic-quote-');
   const workspace = await realpath(tmp.workspace);
   const baseProfileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: options.agentKind ?? 'claude',
     accounts: {
       app: {
         id: 'cli_test',
@@ -503,6 +675,7 @@ async function createHarness(options: {
     },
   };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
+  const sessionCatalog = new SessionCatalog(join(tmp.profile, 'sessions.catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = new FakeAgentAdapter({
     events: options.agentEvents ?? [{ type: 'done', terminationReason: 'normal' }],
@@ -511,7 +684,7 @@ async function createHarness(options: {
   sdkMock.channel = channel;
   const controls = createControls(profileConfig);
   cleanups.push(async () => {
-    await Promise.all([sessions.flush(), workspaces.flush()]);
+    await Promise.all([sessions.flush(), sessionCatalog.flush(), workspaces.flush()]);
     await tmp.cleanup();
   });
   return {
@@ -519,6 +692,7 @@ async function createHarness(options: {
     channel,
     agent,
     sessions,
+    sessionCatalog,
     workspaces,
     profileConfig,
     controls,
@@ -529,6 +703,7 @@ async function startTestBridge(h: {
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
+  sessionCatalog: SessionCatalog;
   workspaces: WorkspaceStore;
   controls: ReturnType<typeof createControls>;
 }): Promise<void> {
@@ -536,6 +711,7 @@ async function startTestBridge(h: {
     cfg: h.profileConfig,
     agent: h.agent,
     sessions: h.sessions,
+    sessionCatalog: h.sessionCatalog,
     workspaces: h.workspaces,
     controls: h.controls,
   });

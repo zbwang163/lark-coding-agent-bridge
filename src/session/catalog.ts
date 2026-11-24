@@ -99,6 +99,22 @@ export class SessionCatalog {
     return { ...entry };
   }
 
+  latestActiveForScope(
+    scopeId: string,
+    agentId: CatalogAgentId,
+  ): SessionCatalogEntry | undefined {
+    const entry = [...this.data.values()]
+      .filter(
+        (candidate) =>
+          candidate.scopeId === scopeId &&
+          candidate.agentId === agentId &&
+          candidate.status === 'active' &&
+          isValidAgentEntry(candidate),
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    return entry ? { ...entry } : undefined;
+  }
+
   upsertActive(input: UpsertSessionCatalogInput): SessionCatalogEntry {
     assertAgentIdentity(input);
     const key = sessionCatalogKey(input);

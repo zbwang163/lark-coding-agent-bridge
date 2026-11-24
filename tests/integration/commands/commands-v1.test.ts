@@ -17,6 +17,7 @@ interface RunOverrides {
   senderId?: string;
   chatId?: string;
   chatMode?: CommandContext['chatMode'];
+  baseChatMode?: CommandContext['baseChatMode'];
   mentions?: NormalizedMessage['mentions'];
 }
 
@@ -59,6 +60,79 @@ describe('Bridge command contracts', () => {
     await expect(h.run(`/cd ${h.tmp.workspace}`)).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toContain('已切换 cwd');
     await expect(realpath(h.tmp.workspace)).resolves.toBe(h.workspaces.cwdFor('chat-1'));
+  });
+
+  it('sets a topic-group default workspace without changing existing topics', async () => {
+    const h = await createHarness();
+    const target = join(h.tmp.root, 'group-workdir');
+    const other = join(h.tmp.root, 'other-workdir');
+    await Promise.all([
+      mkdir(target, { recursive: true }),
+      mkdir(other, { recursive: true }),
+    ]);
+    h.workspaces.setCwd('topic-chat:thread-a', other);
+    h.workspaces.setCwd('topic-chat:thread-b', other);
+    h.workspaces.setCwd('other-chat:thread-a', other);
+    h.sessions.set('topic-chat:thread-a', 'session-a', other);
+    h.sessions.set('topic-chat:thread-b', 'session-b', other);
+
+    await expect(
+      h.run(`/cd --group ${target}`, {
+        chatId: 'topic-chat',
+        scope: 'topic-chat:thread-a',
+        chatMode: 'topic',
+      }),
+    ).resolves.toBe(true);
+
+    const targetRealpath = await realpath(target);
+    expect(lastMarkdown(h.channel)).toContain(`已设置群级 cwd 到 \`${targetRealpath}\``);
+    expect(h.workspaces.cwdFor('topic-chat')).toBe(targetRealpath);
+    expect(h.workspaces.cwdFor('topic-chat:thread-a')).toBe(other);
+    expect(h.workspaces.cwdFor('topic-chat:thread-b')).toBe(other);
+    expect(h.workspaces.cwdFor('other-chat:thread-a')).toBe(other);
+    expect(h.sessions.getRaw('topic-chat:thread-a')?.sessionId).toBe('session-a');
+    expect(h.sessions.getRaw('topic-chat:thread-b')?.sessionId).toBe('session-b');
+  });
+
+  it('treats /cd and /cd --group as group-wide throughout an ordinary group', async () => {
+    const h = await createHarness();
+    const first = join(h.tmp.root, 'first-group-workdir');
+    const second = join(h.tmp.root, 'second-group-workdir');
+    await Promise.all([
+      mkdir(first, { recursive: true }),
+      mkdir(second, { recursive: true }),
+    ]);
+
+    await expect(
+      h.run(`/cd ${first}`, {
+        chatId: 'ordinary-chat',
+        scope: 'ordinary-chat:om_root',
+        chatMode: 'group',
+        baseChatMode: 'group',
+      }),
+    ).resolves.toBe(true);
+    expect(h.workspaces.cwdFor('ordinary-chat')).toBe(await realpath(first));
+    expect(h.workspaces.cwdFor('ordinary-chat:om_root')).toBeUndefined();
+
+    await expect(
+      h.run(`/cd --group ${second}`, {
+        chatId: 'ordinary-chat',
+        scope: 'ordinary-chat:om_root',
+        chatMode: 'topic',
+        baseChatMode: 'group',
+      }),
+    ).resolves.toBe(true);
+    expect(h.workspaces.cwdFor('ordinary-chat')).toBe(await realpath(second));
+    expect(h.workspaces.cwdFor('ordinary-chat:om_root')).toBeUndefined();
+  });
+
+  it('rejects /cd --group in a direct message', async () => {
+    const h = await createHarness();
+
+    await expect(h.run(`/cd --group ${h.tmp.workspace}`)).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('仅支持群聊和话题群');
+    expect(h.workspaces.cwdFor('chat-1')).toBe(await realpath(h.tmp.workspace));
   });
 
   it('scopes named workspaces by profile, scope, and owner', async () => {
@@ -352,6 +426,7 @@ async function createHarness(): Promise<Harness> {
       }),
       scope,
       chatMode: overrides.chatMode ?? 'p2p',
+      baseChatMode: overrides.baseChatMode ?? overrides.chatMode ?? 'p2p',
       sessions,
       workspaces,
       agent,

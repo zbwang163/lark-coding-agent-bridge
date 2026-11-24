@@ -100,6 +100,34 @@ describe('signed card callback dispatch', () => {
     expect(queued[0]?.content).toBe('[card-click] {"choice":"a"}');
   });
 
+  it('scopes ordinary-group topic callbacks by the carrier message root_id', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+    h.channel.rawThreadIds.set('om_card', 'th_created');
+    h.channel.rawRootIds.set('om_card', 'om_question_root');
+    h.activeRuns.register(
+      'oc_group:om_question_root',
+      h.agent.run({ runId: 'run-active', prompt: 'running' }),
+    );
+
+    await h.dispatch({
+      __bridge_cb: true,
+      bridge_token: h.token('agent_callback', {
+        nonce: 'nonce-ordinary-topic',
+        scope: 'oc_group:om_question_root',
+      }),
+      choice: 'a',
+    });
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+    const queued = h.pending.cancel('oc_group:om_question_root');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({
+      content: '[card-click] {"choice":"a"}',
+      rootId: 'om_question_root',
+      threadId: 'th_created',
+    });
+  });
+
   it('rejects bridge callbacks when callback auth is unavailable', async () => {
     const h = await createHarness({ callbackAuth: false });
     const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;

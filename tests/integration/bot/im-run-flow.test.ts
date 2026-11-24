@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeCapability } from '../../../src/agent/capability';
@@ -7,6 +7,7 @@ import { startRunFlow } from '../../../src/bot/run-flow';
 import { ProcessPool } from '../../../src/bot/process-pool';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { RunExecutor } from '../../../src/runtime/run-executor';
+import { SessionCatalog } from '../../../src/session/catalog';
 import { SessionStore } from '../../../src/session/store';
 import { WorkspaceStore } from '../../../src/workspace/store';
 import { FakeAgentAdapter } from '../../helpers/fake-agent';
@@ -100,6 +101,112 @@ describe('IM run flow', () => {
     expect(h.agent.runOptions[0]?.cwd).toBe(workspaceRealpath);
   });
 
+  it('inherits a topic workspace from its group binding', async () => {
+    const h = await createHarness();
+    const workspaceRealpath = await realpath(h.tmp.workspace);
+    h.workspaces.setCwd('topic-chat', h.tmp.workspace);
+
+    const result = await startRunFlow({
+      scopeId: 'topic-chat:thread-1',
+      scope: {
+        source: 'im',
+        chatId: 'topic-chat',
+        threadId: 'thread-1',
+        actorId: 'ou_user',
+      },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(result.cwdRealpath).toBe(workspaceRealpath);
+    expect(h.agent.runOptions[0]?.cwd).toBe(workspaceRealpath);
+    expect(h.workspaces.cwdFor('topic-chat:thread-1')).toBe(workspaceRealpath);
+  });
+
+  it('prefers a topic workspace override over its group binding', async () => {
+    const h = await createHarness();
+    const topicWorkspace = join(h.tmp.root, 'topic-workspace');
+    await mkdir(topicWorkspace);
+    const topicWorkspaceRealpath = await realpath(topicWorkspace);
+    h.workspaces.setCwd('topic-chat', h.tmp.workspace);
+    h.workspaces.setCwd('topic-chat:thread-1', topicWorkspace);
+
+    const result = await startRunFlow({
+      scopeId: 'topic-chat:thread-1',
+      scope: {
+        source: 'im',
+        chatId: 'topic-chat',
+        threadId: 'thread-1',
+        actorId: 'ou_user',
+      },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(result.cwdRealpath).toBe(topicWorkspaceRealpath);
+    expect(h.agent.runOptions[0]?.cwd).toBe(topicWorkspaceRealpath);
+  });
+
+  it('preserves a stored topic cwd when the group default changes', async () => {
+    const h = await createHarness();
+    const previousWorkspace = join(h.tmp.root, 'previous-workspace');
+    const nextWorkspace = join(h.tmp.root, 'next-workspace');
+    await Promise.all([mkdir(previousWorkspace), mkdir(nextWorkspace)]);
+    const previousWorkspaceRealpath = await realpath(previousWorkspace);
+    h.workspaces.setCwd('topic-chat', nextWorkspace);
+    h.sessionCatalog.upsertActive({
+      scopeId: 'topic-chat:thread-existing',
+      agentId: 'claude',
+      cwdRealpath: previousWorkspaceRealpath,
+      policyFingerprint: 'previous-policy',
+      sessionId: 'session-existing',
+      now: 900,
+    });
+
+    const result = await startRunFlow({
+      scopeId: 'topic-chat:thread-existing',
+      scope: {
+        source: 'im',
+        chatId: 'topic-chat',
+        threadId: 'thread-existing',
+        actorId: 'ou_user',
+      },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      sessionCatalog: h.sessionCatalog,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(result.cwdRealpath).toBe(previousWorkspaceRealpath);
+    expect(h.workspaces.cwdFor('topic-chat:thread-existing')).toBe(previousWorkspaceRealpath);
+  });
+
 });
 
 async function createHarness(options: { defaultWorkspace?: boolean } = {}): Promise<{
@@ -107,6 +214,7 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
   agent: FakeAgentAdapter;
   executor: RunExecutor;
   sessions: SessionStore;
+  sessionCatalog: SessionCatalog;
   workspaces: WorkspaceStore;
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
 }> {
@@ -132,9 +240,10 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
     },
   });
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
+  const sessionCatalog = new SessionCatalog(join(tmp.profile, 'sessions.catalog.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   cleanups.push(async () => {
-    await Promise.all([sessions.flush(), workspaces.flush()]);
+    await Promise.all([sessions.flush(), sessionCatalog.flush(), workspaces.flush()]);
     await tmp.cleanup();
   });
   return {
@@ -142,6 +251,7 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
     agent,
     executor,
     sessions,
+    sessionCatalog,
     workspaces,
     profileConfig: {
       ...profileConfig,

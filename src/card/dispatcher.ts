@@ -13,7 +13,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
-import { lookupMessageThreadId } from '../bot/thread-id';
+import { lookupMessageThreadContext } from '../bot/thread-id';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -63,7 +63,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // session — look up the carrier message (the card lives on it) once.
   // Done before the access check so we know the chat mode (p2p vs group)
   // and can skip the chat allowlist for DMs.
-  const { scope, threadId, mode } = await resolveScope(deps);
+  const { scope, threadId, rootId, mode, baseMode } = await resolveScope(deps);
 
   const accessDecision =
     mode === 'p2p'
@@ -88,13 +88,14 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       return;
     }
     log.info('cardAction', 'cmd', { cmd, scope });
-    const msg = makeFakeMsg(deps.evt, threadId);
+    const msg = makeFakeMsg(deps.evt, threadId, rootId, baseMode);
 
     const ctx: CommandContext = {
       channel: deps.channel,
       msg,
       scope,
       chatMode: mode,
+      baseChatMode: baseMode,
       sessions: deps.sessions,
       sessionCatalog: deps.sessionCatalog,
       sessionCatalogIdentity: await commandSessionCatalogIdentity({
@@ -134,7 +135,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // as a follow-up message, with full context of what it sent.
   if (BRIDGE_CALLBACK_MARKER in payload) {
     if (!verifyBridgeToken(deps, payload, scope, 'agent_callback')) return;
-    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
+    forwardToAgent(deps, payload, formValue, scope, threadId, rootId, mode);
     return;
   }
 
@@ -143,21 +144,47 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
 async function resolveScope(
   deps: CardDispatchDeps,
-): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
+): Promise<{
+  scope: string;
+  threadId: string | undefined;
+  rootId: string | undefined;
+  mode: 'p2p' | 'group' | 'topic';
+  baseMode: 'p2p' | 'group' | 'topic';
+}> {
   const chatId = deps.evt.chatId;
-  const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
-  if (mode !== 'topic') {
-    return { scope: chatId, threadId: undefined, mode };
+  const baseMode = await deps.chatModeCache.resolve(deps.channel, chatId);
+  if (baseMode === 'p2p') {
+    return {
+      scope: chatId,
+      threadId: undefined,
+      rootId: undefined,
+      mode: baseMode,
+      baseMode,
+    };
   }
-  // Topic group — need the carrier message's thread_id to compose scope.
-  // One API call per click; could cache by messageId if it ever becomes hot.
-  const threadId = await lookupMessageThreadId(deps.channel, deps.evt.messageId);
-  if (!threadId) {
-    // Fall back to plain chatId. Better to land in the chat's "default"
-    // scope than fail the click silently.
-    return { scope: chatId, threadId: undefined, mode };
+
+  // One API call per click recovers both identifiers omitted by card events.
+  const { threadId, rootId } = await lookupMessageThreadContext(
+    deps.channel,
+    deps.evt.messageId,
+  );
+  if (baseMode === 'topic') {
+    return {
+      scope: threadId ? `${chatId}:${threadId}` : chatId,
+      threadId,
+      rootId,
+      mode: 'topic',
+      baseMode,
+    };
   }
-  return { scope: `${chatId}:${threadId}`, threadId, mode };
+
+  return {
+    scope: rootId ? `${chatId}:${rootId}` : chatId,
+    threadId,
+    rootId,
+    mode: threadId ? 'topic' : 'group',
+    baseMode,
+  };
 }
 
 function forwardToAgent(
@@ -166,6 +193,7 @@ function forwardToAgent(
   formValue: Record<string, unknown> | undefined,
   scope: string,
   threadId: string | undefined,
+  rootId: string | undefined,
   mode: 'p2p' | 'group' | 'topic',
 ): void {
   // Strip the marker so the agent only sees the meaningful fields it set.
@@ -184,6 +212,7 @@ function forwardToAgent(
     chatId: deps.evt.chatId,
     chatType: mode === 'p2p' ? 'p2p' : 'group',
     threadId,
+    rootId,
     senderId: deps.evt.operator.openId,
     senderName: deps.evt.operator.name,
     content: `[card-click] ${JSON.stringify(merged)}`,
@@ -252,12 +281,15 @@ function composeArgs(sub: string, payload: Record<string, unknown>): string {
 function makeFakeMsg(
   evt: CardActionEvent,
   threadId: string | undefined,
+  rootId: string | undefined,
+  baseMode: 'p2p' | 'group' | 'topic',
 ): NormalizedMessage {
   return {
     messageId: evt.messageId,
     chatId: evt.chatId,
-    chatType: 'p2p',
+    chatType: baseMode === 'p2p' ? 'p2p' : 'group',
     threadId,
+    rootId,
     senderId: evt.operator.openId,
     senderName: evt.operator.name,
     content: '',

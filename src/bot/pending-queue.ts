@@ -10,7 +10,8 @@ export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
 
 /**
  * Per-scope debounce queue. `scope` is the session scope string (typically
- * `chatId` for p2p / regular group, `chatId:threadId` for topic groups).
+ * `chatId` for p2p, `chatId:rootMessageId` for ordinary-group topics, or
+ * `chatId:threadId` for native topic groups).
  * Accumulates messages within the same scope inside a quiet window, then
  * flushes as a single batch.
  *

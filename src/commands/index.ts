@@ -118,16 +118,20 @@ export interface CommandContext {
   channel: LarkChannel;
   msg: NormalizedMessage;
   /**
-   * Session scope string. For p2p / regular group it equals `msg.chatId`;
-   * for topic groups it's `${chatId}:${threadId}` (so each topic gets its
-   * own session / cwd / active-run). All handlers should read/write
-   * session / workspace / activeRuns through this — never through
-   * `msg.chatId` directly.
+   * Session scope string. For p2p it equals `msg.chatId`; native topic groups
+   * use `${chatId}:${threadId}`, while ordinary-group topics use
+   * `${chatId}:${rootMessageId}`. Workspace reads inherit from `msg.chatId`
+   * until the topic snapshots its own value. `/cd --group` intentionally
+   * writes the group-level key; session and active-run state stay scoped here.
    */
   scope: string;
   /** Resolved chat mode for `msg.chatId`. Used by /status to surface the
    * scope semantic to the user (`topic` shows "话题独立 session"). */
   chatMode: 'p2p' | 'group' | 'topic';
+  /** Chat mode reported by the chat API before message-level thread routing.
+   * An ordinary group message inside a thread has `chatMode: 'topic'` but
+   * `baseChatMode: 'group'`. */
+  baseChatMode?: 'p2p' | 'group' | 'topic';
   sessions: SessionStore;
   sessionCatalog?: SessionCatalog;
   sessionCatalogIdentity?: SessionCatalogIdentity;
@@ -383,21 +387,39 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
 
 async function handleCd(args: string, ctx: CommandContext): Promise<void> {
   const input = args.trim();
-  if (!input) {
-    await reply(ctx, '用法：`/cd <绝对路径>` 或 `/cd ~/xxx`');
+  const explicitGroupWide = input === '--group' || input.startsWith('--group ');
+  const baseChatMode = ctx.baseChatMode ?? ctx.chatMode;
+  const groupWide = explicitGroupWide || baseChatMode === 'group';
+  const pathInput = explicitGroupWide ? input.slice('--group'.length).trim() : input;
+  if (!pathInput) {
+    await reply(ctx, '用法：`/cd <绝对路径>`、`/cd ~/xxx` 或 `/cd --group <绝对路径>`');
     return;
   }
-  if (!isAbsoluteOrTilde(input)) {
+  if (explicitGroupWide && baseChatMode === 'p2p') {
+    await reply(ctx, '`/cd --group` 仅支持群聊和话题群。');
+    return;
+  }
+  if (!isAbsoluteOrTilde(pathInput)) {
     await reply(ctx, '请使用绝对路径，或 `~/xxx` 表示 home 下的子路径。');
     return;
   }
-  const absolute = expandTilde(input);
+  const absolute = expandTilde(pathInput);
   const workspace = await resolveWorkingDirectory(absolute);
   if (!workspace.ok) {
     await reply(ctx, workspace.userVisible);
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
+  if (groupWide) {
+    ctx.workspaces.setCwd(ctx.msg.chatId, workspace.cwdRealpath);
+    ctx.sessions.clear(ctx.msg.chatId);
+    await reply(
+      ctx,
+      `✓ 已设置群级 cwd 到 \`${workspace.cwdRealpath}\`\n` +
+        '（仅新话题继承；已有话题保持原 workspace）',
+    );
+    return;
+  }
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
   await reply(ctx, `✓ 已切换 cwd 到 \`${workspace.cwdRealpath}\`\n（session 已重置）`);
@@ -752,7 +774,13 @@ async function listCodexResumeHistory(
 }
 
 function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
-  return ctx.workspaces.cwdFor(ctx.scope) ?? ctx.controls.profileConfig.workspaces.default;
+  return (
+    ctx.workspaces.cwdForScope(
+      ctx.scope,
+      ctx.scope !== ctx.msg.chatId ? ctx.msg.chatId : undefined,
+    ) ??
+    ctx.controls.profileConfig.workspaces.default
+  );
 }
 
 function selectedResumeCwd(ctx: CommandContext): string | undefined {

@@ -75,8 +75,22 @@ export interface RecordRunSessionEventInput {
 }
 
 export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFlowResult> {
+  const groupScopeId =
+    input.scope.source === 'im' &&
+    input.scope.chatId &&
+    input.scopeId !== input.scope.chatId
+      ? input.scope.chatId
+      : undefined;
+  const scopedCwd = input.workspaces.cwdFor(input.scopeId);
+  const previousSessionCwd =
+    input.sessionCatalog?.latestActiveForScope(input.scopeId, input.capability.agentId)
+      ?.cwdRealpath ?? input.sessions.getRaw(input.scopeId)?.cwd;
   const requestedCwd =
-    input.workspaces.cwdFor(input.scopeId) ?? input.profileConfig.workspaces.default ?? '';
+    scopedCwd ??
+    previousSessionCwd ??
+    (groupScopeId ? input.workspaces.cwdFor(groupScopeId) : undefined) ??
+    input.profileConfig.workspaces.default ??
+    '';
   const workspace = await resolveWorkingDirectory(requestedCwd);
   if (!workspace.ok) {
     return {
@@ -88,7 +102,6 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       workspace,
     };
   }
-
   const policy = evaluateRunPolicy({
     scope: input.scope,
     attachments: input.attachments,
@@ -175,6 +188,10 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       };
     }
     throw err;
+  }
+
+  if (groupScopeId && !scopedCwd) {
+    input.workspaces.setCwd(input.scopeId, workspace.cwdRealpath);
   }
 
   return {

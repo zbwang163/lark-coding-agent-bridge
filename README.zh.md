@@ -138,7 +138,8 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | 命令 | 作用 |
 |---|---|
 | `/new`, `/reset` | 清空当前会话 |
-| `/cd <path>` | 切换工作目录并重置会话 |
+| `/cd <path>` | 普通群修改群级默认目录，其他场景切换当前 scope 目录 |
+| `/cd --group <path>` | 设置群级默认工作目录，供后续新话题继承 |
 | `/ws list` | 列出命名工作空间 |
 | `/ws save <name>` | 把当前工作目录保存为命名工作空间 |
 | `/ws use <name>` | 切换到命名工作空间 |
@@ -161,6 +162,8 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
+在普通群中，每条顶层用户提问都会被提升为一个飞书话题，并以该根消息建立独立 session；在该话题内继续回复会续接同一个 session。顶层斜杠命令原地处理，不会创建话题；如果命令本来就在已有话题内，回复仍留在该话题中。
+
 ## 回复展示与 COT
 
 `/config` 可以调整三类展示选项：
@@ -170,6 +173,8 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 - **COT 过程消息**：`关闭` 只发送最终回复；`简略` 先用 COT 消息展示 agent 的过程文本和工具摘要；`详细` 还会展示工具参数和截断后的输出。
 
 开启 COT 后，bridge 会把过程消息和最终答案拆成两条消息。过程消息用于追踪 agent 做了什么；最终答案仍由 agent 原始文本生成，bridge 不做启发式过滤。若 agent 把最终答案也作为普通流式文本输出，COT 过程消息中可能会出现对应片段。
+
+普通群顶层问题的第一次回答即使开启了 COT，也会使用普通的话题内回复，因为飞书 COT 接口不能从根消息创建话题；进入自动生成的话题后，后续回复会恢复使用 COT。
 
 ## lark-cli 身份策略
 
@@ -192,6 +197,8 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 ```
 
 bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、系统目录或临时目录根这类范围过大的位置。工作目录只是 agent run 的当前目录，不是文件系统 sandbox；agent 实际能访问哪些文件仍取决于本机 agent 进程及其权限模式。
+
+在话题群中，`/cd <path>` 只作用于当前话题；`/cd --group <path>` 只修改群级默认工作目录，之后首次被 bot 使用的话题会继承它，已经被 bot 使用过的话题保留各自固化的工作目录和 session。在普通群中，`/cd <path>` 与 `/cd --group <path>` 等效，都会修改群级默认工作目录。共享工作目录不会合并 session，各话题仍保持独立会话。私聊不支持 `--group`。
 
 ## 权限模式
 

@@ -1,0 +1,30 @@
+# Codex 单卡片回复
+
+用户已确认：每轮只有一张卡片，执行过程默认折叠，最终答案直接展示。本轮只修改源码，不编译、不运行单测、不部署。
+
+## 方案
+
+采用 CardKit JSON 2.0 卡片实体，持续更新同一实体。过程文字、模型提供的思考摘要和工具调用进入默认收起的“执行过程”面板，最终答案显示在面板外。结束、失败、中断和超时都在原卡片中收尾。只有最终答案的轮次直接发送完成态卡片，空轮次不创建占位消息。
+
+异常结束时没有明确的 `final_text`，既有文字继续保留在受大小限制的过程面板中，终止提示显示在面板外；不将全部历史过程推断为答案，不修改 Codex 事件翻译协议。最终答案本身仍受飞书单卡片 30KB 限制。
+
+仅折叠原过程消息仍留下两条消息，完全删除过程则失去按需查看能力，因此均不采用。折叠只改变飞书界面，不删除卡片数据，也不改变后续上下文提取规则。
+
+## 范围与约束
+
+- Codex 的 `card` 和 `markdown` 回复使用单卡片；显式 `text` 模式只发送最终文本。
+- Codex 不再单独发布 COT 消息；Claude 既有路径保持原行为。
+- 复用 SDK、邮件脱敏、签名停止按钮和工具显示偏好，不增加依赖或配置项。
+- 更新串行执行，sequence 严格递增，过程展示受大小限制；最终答案不因过程限额被截断。
+- 原生流式模式最长 10 分钟，提前关闭后继续更新同一实体。结束时显式关闭流式模式。
+- 创建或发送结果不确定时不盲目发送第二张卡。权限错误停止当前卡片后续 API 操作；其他更新失败在收尾时尝试修复原卡片。
+- GitHub 认证失败，禁止重试或更换身份；本地分支基于备份提交 `98b5060`，不能声称已同步最新远端。提交本地修改，推送和 PR 留待恢复授权。
+
+## 官方依据
+
+- https://open.feishu.cn/document/feishu-cards/card-json-v2-components/containers/collapsible-panel.md
+- https://open.feishu.cn/document/cardkit-v1/streaming-updates-openapi-overview.md
+- https://open.feishu.cn/document/cardkit-v1/card/update.md
+- https://open.feishu.cn/document/cardkit-v1/card/settings.md
+
+需要应用具备 `cardkit:card:write` 和原有消息发送权限，客户端需支持卡片 JSON 2.0（飞书 7.20+）。本轮不调用真实飞书发送接口。

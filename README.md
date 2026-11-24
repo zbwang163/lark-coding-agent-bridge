@@ -172,9 +172,11 @@ In an ordinary group, every top-level user question is promoted to a Feishu/Lark
 - **Tool-call display**: controls whether tool blocks appear in the final card / markdown reply.
 - **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
 
-When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
+Codex sends one CardKit card per turn in `card` / `markdown` reply modes. Commentary and tool calls stay in a collapsed process panel; the final answer updates the body of that same card. Codex does not send a separate COT message. Explicit `text` mode sends only the final result after the run. Tool visibility preferences still apply. Folding changes only the UI; raw card data and context extraction still include the process content.
 
-For the first answer to an ordinary-group root question, the bridge uses the normal threaded reply even when COT is enabled, because Feishu/Lark's COT API cannot create a topic from a root message. COT is available again for follow-ups inside the generated topic.
+The Codex card requires `cardkit:card:write`, the existing message-send permissions, and a JSON 2.0-capable client (Feishu 7.20+). Process details are shortened to fit the card budget without truncating the answer to make room for process text; the answer itself is still subject to Feishu's 30KB card limit. Native streaming is explicitly closed at completion, or before its time limit for long runs; subsequent updates keep using the same entity.
+
+Claude retains separate process and answer messages when COT is enabled. The process view traces the agent's work, while the final answer comes from the agent's raw text without heuristic filtering. The first answer to an ordinary-group root uses a normal threaded reply because the COT API cannot create a topic from a root message; follow-ups inside that topic can use COT.
 
 ## lark-cli identity policy
 

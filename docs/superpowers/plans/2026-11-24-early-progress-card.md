@@ -40,9 +40,9 @@
 
 ### Task 2: 独立测试部署
 
-- [ ] 确认测试端无在途请求，保留旧构建，只替换私有测试 release/dist。
-- [ ] 重启并确认 ws.connected / profile-online，核对构建哈希及生产 PID、启动时间、程序哈希不变。
-- [ ] 更新原 PR，说明真实聊天首卡时延仍需新一轮请求验收。
+- [x] 确认测试端无在途请求，保留旧构建，只替换私有测试 release/dist。
+- [x] 重启并确认 ws.connected / profile-online，核对构建哈希及生产 PID、启动时间、程序哈希不变。
+- [x] 更新原 PR，说明真实聊天首卡时延仍需新一轮请求验收。
 
 ## 执行记录
 
@@ -51,3 +51,5 @@
 - 真实只读 CLI 诊断退出码 0、耗时 18.29 秒，确认 `item.started/completed` 中的工具类型为 `web_search`，公开进度项目为 `agent_message` 且没有 phase 字段。仅记录事件结构，未向飞书发送诊断消息，未改生产服务或凭证。
 - 阅读既有命令异常事件断言，保留仅 completed 命令的原返回约定；新增工具的 completed-only 项目才补齐摘要。不修改或执行既有单测。
 - Final review: 首卡、更新和收尾共享队列；初始授权失败在队列放行前锁定，收尾清除异步创建期间新增定时器。未知项目和 reasoning 不释放候选最终答案。MCP、动态工具及文件变更的真实失败格式未运行验证，实际飞书首卡时延也待新消息验收。
+
+- 测试服务已部署 `3c4227a`，安装 CLI 与构建哈希一致，ws.connected / profile-online 正常，启动 error 事件为 0；生产进程 3839918、启动时间和程序哈希未变。证据：仓库外 `artifacts/lark-channel-bridge/test-deployment-3c4227a.json`。

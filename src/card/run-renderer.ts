@@ -55,7 +55,8 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
 
   if (state.terminal === 'running') {
     if (state.footer) elements.push(footerStatus(state.footer));
-    elements.push(stopButton(options));
+    // Folded Codex cards show progress without an action button.
+    if (!options.foldProgress) elements.push(stopButton(options));
   }
 
   // Mask raw emails across every text field so the Feishu tenant audit doesn't

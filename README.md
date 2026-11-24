@@ -152,7 +152,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/invite group` | Allow the current group to use the bot |
 | `/invite all group` | Allow all groups the bot has joined |
 | `/remove user @name`, `/remove admin @name`, `/remove group` | Remove access entries |
-| `/stop` | Stop the current run, including the card stop button |
+| `/stop` | Stop the current run; Claude cards also offer a stop button |
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
 | `/ps` | List local bridge processes |
 | `/exit <id\|#>` | Stop a bridge process |

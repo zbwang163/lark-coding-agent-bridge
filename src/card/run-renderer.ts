@@ -77,6 +77,9 @@ function foldedRunElements(state: RunState): object[] {
   // A turn can finish without an answer after emitting commentary and tools.
   // Promoting those blocks would unfold the process and bypass its size cap.
   const answer = state.finalText ?? '';
+  // Show live progress until an explicit answer arrives; terminal cards start
+  // collapsed so completed work does not obscure the answer or failure notice.
+  const processExpanded = state.terminal === 'running' && !answer.trim();
   const process: string[] = [];
   if (state.reasoning.content.trim()) process.push(state.reasoning.content.trim());
   for (const group of groupBlocks(state.blocks)) {
@@ -100,9 +103,9 @@ function foldedRunElements(state: RunState): object[] {
     elements.push({
       tag: 'collapsible_panel',
       element_id: 'run_process',
-      expanded: false,
+      expanded: processExpanded,
       header: panelHeader(state.terminal === 'running'
-        ? '🧠 **执行过程（点击展开）**'
+        ? `🧠 **执行过程（点击${processExpanded ? '收起' : '展开'}）**`
         : '🧠 **执行过程（已结束，点击展开）**'),
       border: { color: 'grey', corner_radius: '5px' },
       padding: '8px',
